@@ -219,12 +219,29 @@ export function hoystCommands(tc: ToolCall): string[] {
   return out;
 }
 
-const EXIT_CODE = /"exit_code"\s*:\s*(-?\d+)/g;
+// The code sits in JSON that Codex itself quotes (`{\"exit_code\":0,…}` inside a
+// text part), so the quotes may carry backslashes.
+const EXIT_CODE = /\\*"exit_code\\*"\s*:\s*(-?\d+)/g;
+
+/** The readable text of a tool output: text parts of a content array, else the whole thing. */
+function outputText(output: unknown): string {
+  if (Array.isArray(output)) {
+    const parts = output
+      .map((part) =>
+        part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
+          ? (part as { text: string }).text
+          : toText(part),
+      )
+      .filter(Boolean);
+    return parts.join("\n");
+  }
+  return toText(output);
+}
 
 /** Exit codes of the commands an exec call ran, as Codex reports them in the output. */
 export function exitCodes(tc: ToolCall): number[] {
   if (!SHELL_TOOLS.has(tc.name) || tc.output == null) return [];
-  const text = toText(tc.output);
+  const text = outputText(tc.output);
   if (!text.includes("exit_code")) return [];
   const codes: number[] = [];
   for (const match of text.matchAll(EXIT_CODE)) codes.push(Number(match[1]));

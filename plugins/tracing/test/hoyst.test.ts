@@ -149,6 +149,32 @@ describe("levels", () => {
     expect(toolLevel(tc("exec", "x", "no codes here"))).toBeUndefined();
   });
 
+  it("reads exit codes from Codex 0.162 outputs: a content array with quoted JSON inside", () => {
+    // Real shape: custom_tool_call_output.output is an array of text parts, and the
+    // exec tool's JSON sits inside a text part (quotes escaped once stringified).
+    const real = tc("exec", "x", [
+      { type: "input_text", text: "Script completed\nWall time 5.0 seconds\nOutput:\n" },
+      {
+        type: "input_text",
+        text: '{"chunk_id":"b0","wall_time_seconds":5.0,"exit_code":1,"output":""}',
+      },
+    ]);
+    expect(exitCodes(real)).toEqual([1]);
+    expect(toolLevel(real)).toBe("WARNING");
+    // The same output after JSON.stringify (quotes escaped).
+    const stringified = tc("exec", "x", JSON.stringify(real.output));
+    expect(exitCodes(stringified)).toEqual([1]);
+    // A long-running session reports no exit code in its first output.
+    const session = tc("exec", "x", [
+      {
+        type: "input_text",
+        text: '{"chunk_id":"c1","wall_time_seconds":5.0,"session_id":26998,"output":""}',
+      },
+    ]);
+    expect(exitCodes(session)).toEqual([]);
+    expect(toolLevel(session)).toBeUndefined();
+  });
+
   it("drops tool-only model steps to DEBUG", () => {
     const step = { startTime: 0, endTime: 1, toolCalls: [] };
     expect(generationLevel(step)).toBe("DEBUG");
