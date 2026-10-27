@@ -14,6 +14,23 @@ import { TraceFlags, type SpanContext } from "@opentelemetry/api";
 
 import type { Config } from "./config.js";
 import { ExportBatch } from "./export-batch.js";
+import {
+  delegationName,
+  delegationTarget,
+  exitCodes,
+  generationLevel,
+  helperFromSessionMeta,
+  helperFromSpawnArgs,
+  helperMetadata,
+  hoystCommands,
+  phaseBoundary,
+  phaseFor,
+  phaseMetadata,
+  spawnObservationName,
+  subagentTurnName,
+  toolLevel,
+  type Phase,
+} from "./hoyst.js";
 import { currentIdSeed, seedIds, type ExportReceipt } from "./instrumentation.js";
 import { parseArgs } from "./parse.js";
 import { readRollout, readRolloutMeta, readTurns, ROLLOUT_LIMITS } from "./rollout.js";
@@ -290,6 +307,12 @@ function toolObservationName(tc: ToolCall): string {
   const skill = skillsForToolCall(tc)[0];
   if (skill) return `skill:${skill}`;
   if (tc.mcp) return `${tc.mcp.server}.${tc.mcp.tool}`;
+  // Hoyst fork: helpers and delegations carry the task they concern.
+  const hoyst =
+    tc.name === "spawn_agent"
+      ? spawnObservationName(helperFromSpawnArgs(tc.args))
+      : delegationName(tc);
+  if (hoyst) return hoyst;
   return tc.name || "tool";
 }
 
@@ -524,15 +547,32 @@ async function emitTurn(
     spanIds: Set<string>;
     routingTruncated?: boolean;
     depth?: number;
+    /** Hoyst fork: ordinal of this turn in its rollout, for helper turn names. */
+    turnNumber?: number;
+    turnCount?: number;
+    /** Hoyst fork: id seed for the main turn, so the root span id is precomputable. */
+    idSeed?: string;
   },
 ): Promise<boolean> {
   const isSubagent = sessionMeta.isSubagentThread === true || ctx.parentObservation != null;
 
   const outerSeed = currentIdSeed();
-  seedIds(`${sessionMeta.sessionId}:${turn.turnId ?? "no-turn-id"}`);
+  seedIds(ctx.idSeed ?? `${sessionMeta.sessionId}:${turn.turnId ?? "no-turn-id"}`);
+
+  // Hoyst fork: a helper turn is named after its task (`turn 2/3 · strang_c`)
+  // and carries its phase; the orchestrator's observations carry the phase the
+  // run is in, tracked from the hoyst commands it executes.
+  const helper = isSubagent ? helperFromSessionMeta(sessionMeta) : undefined;
+  const helperPhase = helper
+    ? phaseFor(helper.taskName, helper.agentType, ctx.config.phase_map)
+    : undefined;
+  let currentPhase: Phase | undefined;
+  let phaseSpan: LangfuseObservation | undefined;
 
   const root = startObservation(
-    isSubagent ? "Codex Subagent Turn" : (ctx.config.trace_name ?? "Codex Turn"),
+    isSubagent
+      ? (subagentTurnName(helper!, ctx.turnNumber, ctx.turnCount) ?? "Codex Subagent Turn")
+      : (ctx.config.trace_name ?? "Codex Turn"),
     {
       input: toMultimodalContent(turn.userInput, turn.userImages),
       output: turn.finalOutput,
@@ -562,6 +602,9 @@ async function emitTurn(
         ...(turn.toolDefinitions.length
           ? { "codex.tool_definition_count": turn.toolDefinitions.length }
           : {}),
+        ...(helper ? helperMetadata(helper, helperPhase) : {}),
+        ...(helper && ctx.turnNumber ? { "hoyst.turn": ctx.turnNumber } : {}),
+        ...(helper && ctx.turnCount ? { "hoyst.turns": ctx.turnCount } : {}),
       },
     },
     {
@@ -570,6 +613,12 @@ async function emitTurn(
       parentSpanContext: ctx.parentObservation?.otelSpan.spanContext() ?? ctx.parentSpanContext,
     },
   );
+  if (helper?.taskName) {
+    debugLog(
+      `helper turn ${ctx.turnNumber ?? "?"}/${ctx.turnCount ?? "?"} task=${helper.taskName} ` +
+        `type=${helper.agentType ?? "-"} thread=${sessionMeta.sessionId}`,
+    );
+  }
 
   // A nested turn is never a trace root. The SDK marks a span as "app root"
   // when its parent is no longer tracked, and the spawn_agent tool span the
@@ -606,21 +655,53 @@ async function emitTurn(
             ? { modelParameters: { reasoning_effort: turn.reasoningEffort } }
             : {}),
           usageDetails: toUsageDetails(step.usage),
+          // Hoyst fork: a step that only carries tool calls is noise for a
+          // domain reader; DEBUG keeps it out of the default views.
+          level: generationLevel(step),
           metadata: {
             "codex.step_index": i,
             ...(input.truncated ? { "codex.generation_input.truncated": true } : {}),
             "codex.reasoning_effort": turn.reasoningEffort,
+            ...phaseMetadata(isSubagent ? helperPhase : currentPhase),
           },
         },
         {
           asType: "generation",
           startTime: new Date(step.startTime),
-          parentSpanContext: root.otelSpan.spanContext(),
+          parentSpanContext: (phaseSpan ?? root).otelSpan.spanContext(),
         },
       );
 
       for (const tc of step.toolCalls) {
-        const observation = emitToolCall(tc, root, step.endTime);
+        if (!isSubagent) {
+          // A hoyst command that opens a phase of the skill (corpus build,
+          // report freeze, …) moves the orchestrator into that phase.
+          const boundary = phaseBoundary(hoystCommands(tc));
+          if (boundary && boundary.phase !== currentPhase?.phase) {
+            currentPhase = boundary;
+            if (ctx.config.phase_spans) {
+              if (phaseSpan) {
+                phaseSpan.end(new Date(tc.startTime));
+                await ctx.batch.ended(phaseSpan, ctx.spanIds);
+              }
+              phaseSpan = startObservation(
+                `phase:${boundary.phase}`,
+                { metadata: phaseMetadata(boundary) },
+                {
+                  asType: "span",
+                  startTime: new Date(tc.startTime),
+                  parentSpanContext: root.otelSpan.spanContext(),
+                },
+              );
+            }
+          }
+        }
+        const observation = emitToolCall(
+          tc,
+          phaseSpan ?? root,
+          step.endTime,
+          isSubagent ? helperPhase : currentPhase,
+        );
         if (tc.name === "spawn_agent") spawnObservations.set(tc.callId, observation);
         await ctx.batch.ended(observation, ctx.spanIds);
       }
@@ -666,6 +747,10 @@ async function emitTurn(
     });
   }
 
+  if (phaseSpan) {
+    phaseSpan.end(new Date(turn.endTime));
+    await ctx.batch.ended(phaseSpan, ctx.spanIds);
+  }
   root.end(new Date(turn.endTime));
   try {
     await ctx.batch.ended(root, ctx.spanIds);
@@ -676,19 +761,44 @@ async function emitTurn(
   return failure === undefined;
 }
 
+function hoystToolMetadata(tc: ToolCall, phase: Phase | undefined): Record<string, unknown> {
+  if (tc.name === "spawn_agent") {
+    const helper = helperFromSpawnArgs(tc.args);
+    return helperMetadata(helper, phaseFor(helper.taskName, helper.agentType) ?? phase);
+  }
+  const target = delegationTarget(tc);
+  if (target) return { "hoyst.target": target, ...phaseMetadata(phase) };
+  const commands = hoystCommands(tc);
+  const codes = exitCodes(tc);
+  return {
+    ...(commands.length ? { "hoyst.cmds": commands.join("; ") } : {}),
+    ...(codes.length ? { "hoyst.exit_codes": codes.join(",") } : {}),
+    ...phaseMetadata(phase),
+  };
+}
+
 function emitToolCall(
   tc: ToolCall,
   parent: LangfuseObservation,
   fallbackEnd: number,
+  phase?: Phase,
 ): LangfuseObservation {
+  // Hoyst fork: polling tools drop to DEBUG, a shell command that exited
+  // non-zero is a WARNING (the agent usually recovers; ERROR stays for faults).
+  const level = tc.error ? "ERROR" : toolLevel(tc);
+  const failedExit = exitCodes(tc).filter((code) => code !== 0);
   const tool = startObservation(
     toolObservationName(tc),
     {
       input: tc.args,
       output: tc.output != null ? toText(tc.output) : undefined,
-      level: tc.error ? "ERROR" : undefined,
-      statusMessage: tc.error,
-      metadata: { "codex.call_id": tc.callId, "codex.tool_name": tc.name || "tool" },
+      level,
+      statusMessage: tc.error ?? (failedExit.length ? `exit ${failedExit.join(",")}` : undefined),
+      metadata: {
+        "codex.call_id": tc.callId,
+        "codex.tool_name": tc.name || "tool",
+        ...hoystToolMetadata(tc, phase),
+      },
     },
     {
       asType: "tool",
@@ -870,6 +980,8 @@ export async function convertRollout(
           spanIds: options.spanIds ?? new Set(),
           routingTruncated,
           depth: options.depth,
+          turnNumber: turnIndex + 1,
+          turnCount: totalTurns,
         });
         if (!success) throw new Error(`Subagent turn ${turn.turnId ?? "(no turn id)"} failed`);
         continue;
@@ -888,6 +1000,13 @@ export async function convertRollout(
         (await seededTraceParent(options.config, sessionMeta, turnIndex + 1));
       const spanIds = new Set<string>();
 
+      // Hoyst fork: with a trace seed the main turn's span ids follow the seed
+      // too, so the root span id is sha256("<seed>:<N>:span:0")[:16] and a
+      // caller can attach spans to the root before the upload happens.
+      const idSeed =
+        options.config.trace_seed && !attached && !sessionMeta.isSubagentThread
+          ? `${options.config.trace_seed}:${turnIndex + 1}`
+          : undefined;
       const emit = () =>
         emitTurn(turn, sessionMeta, {
           config: options.config,
@@ -903,6 +1022,9 @@ export async function convertRollout(
           spanIds,
           routingTruncated,
           depth: options.depth,
+          turnNumber: turnIndex + 1,
+          turnCount: totalTurns,
+          idSeed,
         });
 
       let success: boolean;

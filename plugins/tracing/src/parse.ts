@@ -120,7 +120,22 @@ export function sessionMetaFrom(line: RolloutLine): SessionMeta {
     base_instructions?: { text?: string } | null;
     parent_thread_id?: string | null;
     thread_source?: string | null;
+    agent_path?: string | null;
+    agent_nickname?: string | null;
+    agent_role?: string | null;
+    source?: {
+      subagent?: {
+        thread_spawn?: {
+          agent_path?: string | null;
+          agent_nickname?: string | null;
+          agent_role?: string | null;
+        } | null;
+      } | null;
+    } | null;
   };
+  const spawn = p.source?.subagent?.thread_spawn ?? undefined;
+  const text = (value: unknown): string | undefined =>
+    typeof value === "string" && value ? value : undefined;
   return {
     sessionId: typeof p.id === "string" ? p.id : "unknown",
     cliVersion: p.cli_version,
@@ -128,6 +143,9 @@ export function sessionMetaFrom(line: RolloutLine): SessionMeta {
     baseInstructions: p.base_instructions?.text,
     isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent",
     parentThreadId: p.parent_thread_id ? p.parent_thread_id : undefined,
+    agentPath: text(p.agent_path) ?? text(spawn?.agent_path),
+    agentNickname: text(p.agent_nickname) ?? text(spawn?.agent_nickname),
+    agentRole: text(p.agent_role) ?? text(spawn?.agent_role),
   };
 }
 

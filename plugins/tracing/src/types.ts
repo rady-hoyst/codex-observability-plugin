@@ -172,6 +172,10 @@ export type SessionMeta = {
   baseInstructions?: string;
   isSubagentThread?: boolean;
   parentThreadId?: string;
+  /** Codex ≥ 0.160 subagent threads: `/root/<task_name>`, nickname and role. */
+  agentPath?: string;
+  agentNickname?: string;
+  agentRole?: string;
 };
 
 export type ToolDefinition = {

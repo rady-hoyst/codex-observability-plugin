@@ -1193,7 +1193,8 @@ describe("attached mode (external parent span)", () => {
     const spawn = exporter.getFinishedSpans().find((s) => s.name === "spawn_agent")!;
     expect(parentId(spawn)).toBe(parentTurn.spanContext().spanId);
     expect(parentId(subagentTurn)).toBe(spawn.spanContext().spanId);
-    expect(subagentTurn.attributes["langfuse.internal.is_app_root"]).toBeUndefined();
+    // Hoyst fork: nested turns are marked explicitly (upstream left this unset).
+    expect(subagentTurn.attributes["langfuse.internal.is_app_root"]).toBe(false);
   });
 
   it("marks turns uploaded exactly as standalone mode does", async () => {

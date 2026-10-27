@@ -31,6 +31,17 @@ export function currentIdSeed(): string | undefined {
   return idSeed;
 }
 
+/** The id generator the tracer provider uses; exported so tests can pin seeded ids. */
+export function seededIdGenerator(): {
+  generateTraceId: () => string;
+  generateSpanId: () => string;
+} {
+  return {
+    generateTraceId: () => seededId("trace"),
+    generateSpanId: () => seededId("span"),
+  };
+}
+
 function seededId(kind: "trace" | "span"): string {
   const hexChars = kind === "trace" ? TRACE_ID_HEX_CHARS : SPAN_ID_HEX_CHARS;
   if (idSeed === undefined) return randomBytes(hexChars / 2).toString("hex");
@@ -140,10 +151,7 @@ export function setupInstrumentation(config: Config): Instrumentation {
   const provider = new NodeTracerProvider({
     resource: buildResource(),
     spanProcessors: [trackedProcessor],
-    idGenerator: {
-      generateTraceId: () => seededId("trace"),
-      generateSpanId: () => seededId("span"),
-    },
+    idGenerator: seededIdGenerator(),
   });
   provider.register();
 
