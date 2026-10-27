@@ -122,3 +122,16 @@ describe("trace ownership in attached mode", () => {
     expect(root.attributes["session.id"]).toBe("sess-basic");
   });
 });
+
+describe("nested helper turns (Hoyst fork)", () => {
+  it("never marks a subagent turn as an app root, even though its spawn span has ended", async () => {
+    const dir = stageFixtures();
+    await convertRollout(path.join(dir, "rollout-parent.jsonl"), { config: baseConfig });
+    await processor.forceFlush();
+    const spans = exporter.getFinishedSpans();
+    const parent = spans.find((s) => s.name === "Codex Turn");
+    const child = spans.find((s) => s.name === "Codex Subagent Turn");
+    expect(parent?.attributes["langfuse.internal.is_app_root"]).toBe(true);
+    expect(child?.attributes["langfuse.internal.is_app_root"]).toBe(false);
+  });
+});

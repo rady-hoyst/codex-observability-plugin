@@ -571,7 +571,12 @@ async function emitTurn(
     },
   );
 
-  if (ctx.attached) {
+  // A nested turn is never a trace root. The SDK marks a span as "app root"
+  // when its parent is no longer tracked, and the spawn_agent tool span the
+  // helper hangs under has already ended by the time the helper rollout is
+  // converted — so without this every helper turn showed up as an extra root
+  // in the Langfuse trace list and could upsert trace-level fields.
+  if (ctx.attached || ctx.parentObservation != null) {
     root.otelSpan.setAttribute(LangfuseOtelSpanAttributes.IS_APP_ROOT, false);
   }
 
