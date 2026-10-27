@@ -27,6 +27,16 @@ export const ConfigSchema = z.object({
   trace_seed: z.string().optional(),
   debug: z.boolean(),
   fail_on_error: z.boolean(),
+  // Hoyst fork: identity of the trace as the caller knows it. A skill run is
+  // one trace named after the skill, in the session of its run, with the
+  // skill version as the Langfuse version.
+  trace_name: z.string().optional(),
+  session_id: z.string().optional(),
+  version: z.string().optional(),
+  // Hoyst fork: phase of each helper/tool from its task name (merged over the
+  // built-in table in hoyst.ts) and whether to open one span per phase.
+  phase_map: z.record(z.string(), z.string()).optional(),
+  phase_spans: z.boolean().optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -115,6 +125,8 @@ async function readConfigFile(file: string): Promise<Partial<Config> | undefined
         skill_tags: raw.skill_tags != null ? parseBoolean(raw.skill_tags) : undefined,
         debug: raw.debug != null ? parseBoolean(raw.debug) : undefined,
         fail_on_error: raw.fail_on_error != null ? parseBoolean(raw.fail_on_error) : undefined,
+        phase_map: raw.phase_map != null ? parseMetadata(raw.phase_map) : undefined,
+        phase_spans: raw.phase_spans != null ? parseBoolean(raw.phase_spans) : undefined,
       }),
     );
   } catch {
@@ -171,6 +183,11 @@ function readEnvConfig(env: Record<string, string | undefined>): Partial<Config>
       trace_seed: env.LANGFUSE_CODEX_TRACE_SEED,
       debug: parseBoolean(env.LANGFUSE_CODEX_DEBUG),
       fail_on_error: parseBoolean(env.LANGFUSE_CODEX_FAIL_ON_ERROR),
+      trace_name: env.LANGFUSE_CODEX_TRACE_NAME?.trim() || undefined,
+      session_id: env.LANGFUSE_CODEX_SESSION_ID?.trim() || undefined,
+      version: env.LANGFUSE_CODEX_VERSION?.trim() || undefined,
+      phase_map: parseMetadata(env.LANGFUSE_CODEX_PHASE_MAP),
+      phase_spans: parseBoolean(env.LANGFUSE_CODEX_PHASE_SPANS),
     }),
   );
 }

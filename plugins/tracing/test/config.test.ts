@@ -250,3 +250,40 @@ describe("getConfig", () => {
     expect(fromEnv.fail_on_error).toBe(false);
   });
 });
+
+describe("Hoyst fork: trace identity and phases from the environment", () => {
+  it("reads trace name, session, version, phase map and phase spans", async () => {
+    const { getConfig } = await import("../src/config.js");
+    const config = await getConfig({
+      home: "/nonexistent-home",
+      cwd: "/nonexistent-cwd",
+      env: {
+        TRACE_TO_LANGFUSE: "true",
+        LANGFUSE_PUBLIC_KEY: "pk",
+        LANGFUSE_SECRET_KEY: "sk",
+        LANGFUSE_CODEX_TRACE_NAME: " skill.zu_bestimmung ",
+        LANGFUSE_CODEX_SESSION_ID: "case_a1:sr_1",
+        LANGFUSE_CODEX_VERSION: "0.26.2",
+        LANGFUSE_CODEX_PHASE_MAP: '{"heilung":"3","type:zu-urteil":"2"}',
+        LANGFUSE_CODEX_PHASE_SPANS: "true",
+      },
+    });
+    expect(config.trace_name).toBe("skill.zu_bestimmung");
+    expect(config.session_id).toBe("case_a1:sr_1");
+    expect(config.version).toBe("0.26.2");
+    expect(config.phase_map).toEqual({ heilung: "3", "type:zu-urteil": "2" });
+    expect(config.phase_spans).toBe(true);
+  });
+
+  it("leaves them unset when the environment is empty", async () => {
+    const { getConfig } = await import("../src/config.js");
+    const config = await getConfig({
+      home: "/nonexistent-home",
+      cwd: "/nonexistent-cwd",
+      env: { LANGFUSE_CODEX_TRACE_NAME: "   " },
+    });
+    expect(config.trace_name).toBeUndefined();
+    expect(config.session_id).toBeUndefined();
+    expect(config.phase_spans).toBeUndefined();
+  });
+});

@@ -532,7 +532,7 @@ async function emitTurn(
   seedIds(`${sessionMeta.sessionId}:${turn.turnId ?? "no-turn-id"}`);
 
   const root = startObservation(
-    isSubagent ? "Codex Subagent Turn" : "Codex Turn",
+    isSubagent ? "Codex Subagent Turn" : (ctx.config.trace_name ?? "Codex Turn"),
     {
       input: toMultimodalContent(turn.userInput, turn.userImages),
       output: turn.finalOutput,
@@ -910,13 +910,25 @@ export async function convertRollout(
         success = await emit();
       } else {
         const tags = traceTags(options.config, turn);
+        // Hoyst fork: the caller may name the trace and its session (a skill
+        // run: `skill.<id>` in session `<case>:<run>`); the Codex thread id
+        // then moves to the trace metadata. Without the config the trace is
+        // named and keyed as before.
+        const traceName =
+          options.config.trace_name ??
+          (sessionMeta.isSubagentThread ? "Codex Subagent Turn" : "Codex Turn");
+        const metadata = {
+          ...(options.config.metadata ?? {}),
+          ...(options.config.session_id ? { "codex.thread_id": sessionMeta.sessionId } : {}),
+        };
         success = await propagateAttributes(
           {
-            sessionId: sessionMeta.sessionId,
-            traceName: sessionMeta.isSubagentThread ? "Codex Subagent Turn" : "Codex Turn",
+            sessionId: options.config.session_id ?? sessionMeta.sessionId,
+            traceName,
             ...(options.config.user_id ? { userId: options.config.user_id } : {}),
+            ...(options.config.version ? { version: options.config.version } : {}),
             ...(tags.length > 0 ? { tags } : {}),
-            ...(options.config.metadata ? { metadata: options.config.metadata } : {}),
+            ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
           },
           emit,
         );

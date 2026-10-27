@@ -135,3 +135,40 @@ describe("nested helper turns (Hoyst fork)", () => {
     expect(child?.attributes["langfuse.internal.is_app_root"]).toBe(false);
   });
 });
+
+describe("trace identity from the caller (Hoyst fork)", () => {
+  it("names the trace, keys its session and sets the version from the config", async () => {
+    const dir = stageFixtures();
+    const config: Config = {
+      ...baseConfig,
+      trace_name: "skill.zu_bestimmung",
+      session_id: "case_a1:sr_1",
+      version: "0.26.2",
+      user_id: "kette",
+      tags: ["skill:zu_bestimmung", "fall:Muster, GmbH"],
+      metadata: { "hoyst.run_id": "sr_1" },
+    };
+    await convertRollout(path.join(dir, "rollout-basic-main.jsonl"), { config });
+
+    await processor.forceFlush();
+    const root = exporter.getFinishedSpans().find((s) => s.name === "skill.zu_bestimmung")!;
+    expect(root).toBeDefined();
+    expect(root.attributes["langfuse.trace.name"]).toBe("skill.zu_bestimmung");
+    expect(root.attributes["session.id"]).toBe("case_a1:sr_1");
+    expect(root.attributes["user.id"]).toBe("kette");
+    expect(root.attributes["langfuse.version"]).toBe("0.26.2");
+    expect(root.attributes["langfuse.trace.tags"]).toContain("fall:Muster, GmbH");
+    expect(root.attributes["langfuse.trace.metadata.hoyst.run_id"]).toBe("sr_1");
+    // The Codex thread id is still reachable, as trace metadata.
+    expect(root.attributes["langfuse.trace.metadata.codex.thread_id"]).toBe("sess-basic");
+  });
+
+  it("keeps the old name and the thread id as session without the config", async () => {
+    const dir = stageFixtures();
+    await convertRollout(path.join(dir, "rollout-basic-main.jsonl"), { config: baseConfig });
+    const root = await turnRoot();
+    expect(root.name).toBe("Codex Turn");
+    expect(root.attributes["session.id"]).toBe("sess-basic");
+    expect(root.attributes["langfuse.version"]).toBeUndefined();
+  });
+});
