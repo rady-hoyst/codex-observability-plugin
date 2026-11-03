@@ -17,6 +17,8 @@ import { ExportBatch } from "./export-batch.js";
 import {
   delegationName,
   delegationTarget,
+  execInput,
+  execOutput,
   exitCodes,
   generationLevel,
   helperFromSessionMeta,
@@ -790,8 +792,10 @@ function emitToolCall(
   const tool = startObservation(
     toolObservationName(tc),
     {
-      input: tc.args,
-      output: tc.output != null ? toText(tc.output) : undefined,
+      // Hoyst fork: exec calls show their command object and the plain output of
+      // the Codex 0.162 script wrapper (hoyst.ts); other tools stay as they are.
+      input: execInput(tc),
+      output: tc.output != null ? (execOutput(tc) ?? toText(tc.output)) : undefined,
       level,
       statusMessage: tc.error ?? (failedExit.length ? `exit ${failedExit.join(",")}` : undefined),
       metadata: {

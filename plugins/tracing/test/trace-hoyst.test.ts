@@ -200,6 +200,28 @@ describe("Hoyst skill run", () => {
     );
   });
 
+  it("shows exec calls as their command and the plain output (Codex 0.162 shape)", async () => {
+    const dir = stageFixtures();
+    await convertRollout(path.join(dir, "rollout-hoyst-main.jsonl"), { config: baseConfig });
+    const ref = byName("exec").find((s) => meta(s, "hoyst.cmds") === "ref methodik")!;
+    expect(ref).toBeDefined();
+    expect(JSON.parse(attr(ref, "langfuse.observation.input")!)).toEqual({
+      cmd: "hoyst ref methodik --format text",
+      max_output_tokens: 3500,
+    });
+    expect(attr(ref, "langfuse.observation.output")).toBe(
+      "IDW S 11: Liquiditätsbilanz\nStichtag: 2025-06-25",
+    );
+    expect(meta(ref, "hoyst.exit_codes")).toBe("0");
+    expect(meta(ref, "hoyst.phase")).toBe("4b");
+    // An older output shape keeps its raw text; the command object is read all the same.
+    const corpus = byName("exec").find((s) => meta(s, "hoyst.cmds") === "corpus build")!;
+    expect(JSON.parse(attr(corpus, "langfuse.observation.input")!)).toEqual({
+      cmd: "hoyst corpus build --case /work/fall",
+    });
+    expect(attr(corpus, "langfuse.observation.output")).toContain("'input_text'");
+  });
+
   it("keeps upstream names for rollouts without Hoyst task names", async () => {
     const dir = stageFixtures();
     await convertRollout(path.join(dir, "rollout-parent.jsonl"), {

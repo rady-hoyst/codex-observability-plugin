@@ -248,6 +248,249 @@ export function exitCodes(tc: ToolCall): number[] {
   return codes;
 }
 
+// ---------------------------------------------------------------------------
+// Codex 0.162 exec scripts. The exec tool runs a JS snippet such as
+// `text(await tools.exec_command({cmd:"hoyst case list",max_output_tokens:3500}));`
+// and answers with text parts, one JSON chunk per command:
+// `{"chunk_id":"…","wall_time_seconds":0.2,"exit_code":0,"output":"…"}`.
+// A domain reader wants the command and its output, not the wrapper.
+
+export type ExecCommand = { cmd: string } & Record<string, string | number | boolean>;
+
+const SIMPLE_ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  b: "\b",
+  f: "\f",
+  v: "\v",
+  "0": "\0",
+};
+
+/** The JS string literal whose opening quote sits at `start`; a template keeps its `${…}` verbatim. */
+function readStringLiteral(
+  script: string,
+  start: number,
+): { value: string; end: number } | undefined {
+  const quote = script[start];
+  let out = "";
+  for (let i = start + 1; i < script.length; i++) {
+    const ch = script[i];
+    if (ch === "\\") {
+      const next = script[i + 1];
+      if (next === undefined) return undefined;
+      if (next === "u" && /^[0-9a-fA-F]{4}$/.test(script.slice(i + 2, i + 6))) {
+        out += String.fromCharCode(parseInt(script.slice(i + 2, i + 6), 16));
+        i += 5;
+      } else if (next === "x" && /^[0-9a-fA-F]{2}$/.test(script.slice(i + 2, i + 4))) {
+        out += String.fromCharCode(parseInt(script.slice(i + 2, i + 4), 16));
+        i += 3;
+      } else {
+        if (next !== "\n") out += SIMPLE_ESCAPES[next] ?? next;
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === quote) return { value: out, end: i + 1 };
+    if (quote === "`" && ch === "$" && script[i + 1] === "{") {
+      let depth = 0;
+      let j = i;
+      for (; j < script.length; j++) {
+        if (script[j] === "{") depth += 1;
+        else if (script[j] === "}" && --depth === 0) break;
+      }
+      if (j >= script.length) return undefined;
+      out += script.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    out += ch;
+  }
+  return undefined;
+}
+
+/** The string a `const name = "…"` in the script binds (ES shorthand `{cmd}` properties). */
+function boundString(script: string, name: string): string | undefined {
+  const pattern = new RegExp(
+    `(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\s*=\\s*(?=["'\`])`,
+  );
+  const match = pattern.exec(script);
+  return match ? readStringLiteral(script, match.index + match[0].length)?.value : undefined;
+}
+
+const IDENTIFIER = /[A-Za-z_$][\w$]*/y;
+const NUMBER = /-?\d+(?:\.\d+)?/y;
+const SEPARATORS = /[\s,]*/y;
+
+/** The object literal of one `tools.exec_command({…})` call, its `{` at `start`. */
+function readCallObject(script: string, start: number): ExecCommand | undefined {
+  const out: Record<string, string | number | boolean> = {};
+  let i = start + 1;
+  const skip = () => {
+    SEPARATORS.lastIndex = i;
+    SEPARATORS.exec(script);
+    i = SEPARATORS.lastIndex;
+  };
+  const at = (pattern: RegExp): string | undefined => {
+    pattern.lastIndex = i;
+    return pattern.exec(script)?.[0];
+  };
+  for (;;) {
+    skip();
+    if (script[i] === "}") break;
+    let key: string | undefined;
+    if (script[i] === '"' || script[i] === "'") {
+      const literal = readStringLiteral(script, i);
+      if (!literal) return undefined;
+      key = literal.value;
+      i = literal.end;
+    } else {
+      key = at(IDENTIFIER);
+      if (!key) return undefined;
+      i += key.length;
+    }
+    skip();
+    let value: string | number | boolean | undefined;
+    if (script[i] !== ":") {
+      value = boundString(script, key);
+    } else {
+      i += 1;
+      skip();
+      const ch = script[i];
+      const number = at(NUMBER);
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const literal = readStringLiteral(script, i);
+        if (!literal) return undefined;
+        value = literal.value;
+        i = literal.end;
+      } else if (number) {
+        value = Number(number);
+        i += number.length;
+      } else {
+        const ident = at(IDENTIFIER);
+        if (!ident) return undefined;
+        value =
+          ident === "true" || ident === "false" ? ident === "true" : boundString(script, ident);
+        i += ident.length;
+      }
+    }
+    if (value === undefined) return undefined;
+    out[key] = value;
+  }
+  return typeof out.cmd === "string" ? (out as ExecCommand) : undefined;
+}
+
+const EXEC_CALL = /tools\.exec_command\s*\(\s*(?=\{)/g;
+const OTHER_TOOL_CALL = /tools\.(?!exec_command\b)[A-Za-z_$][\w$]*\s*\(/;
+
+/** The `tools.exec_command({…})` calls of an exec script, in order; none for other shapes. */
+export function execCommands(tc: ToolCall): ExecCommand[] {
+  if (!SHELL_TOOLS.has(tc.name) || typeof tc.args !== "string") return [];
+  const script = tc.args;
+  const calls: ExecCommand[] = [];
+  for (const match of script.matchAll(EXEC_CALL)) {
+    const call = readCallObject(script, match.index + match[0].length);
+    if (call) calls.push(call);
+  }
+  return calls;
+}
+
+/**
+ * The input of an exec observation: the command object of a Codex 0.162 script
+ * (`{cmd, max_output_tokens}`; an array when the script ran several commands),
+ * else the raw arguments (older shapes, scripts that also patch files or read images).
+ */
+export function execInput(tc: ToolCall): unknown {
+  if (typeof tc.args !== "string") return tc.args;
+  const calls = execCommands(tc);
+  if (calls.length === 0 || OTHER_TOOL_CALL.test(tc.args)) return tc.args;
+  return calls.length === 1 ? calls[0] : calls;
+}
+
+type ExecChunk = { output: string; exit_code?: unknown; session_id?: unknown };
+const HEADER_LINE = /^(Script completed|Wall time .*|Output:)$/;
+
+/** The JSON chunk Codex writes per command, if the line is one. */
+function execChunk(line: string): ExecChunk | undefined {
+  if (!line.startsWith("{") || !line.includes('"output"')) return undefined;
+  try {
+    const parsed = JSON.parse(line) as { output?: unknown } | null;
+    return parsed && typeof parsed.output === "string" ? (parsed as ExecChunk) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The text parts of an output, from the array itself or its JSON text. */
+function outputParts(output: unknown): unknown[] | undefined {
+  if (Array.isArray(output)) return output;
+  if (typeof output !== "string" || !output.startsWith("[")) return undefined;
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The output of an exec observation as plain text: the `output` of every command
+ * chunk (headed by its command when the script ran several) or the text the script
+ * printed itself, warnings kept, the "Script completed / Wall time / Output:" header
+ * dropped, images as their data URI. `undefined` for other shapes, so the caller
+ * keeps the raw text.
+ */
+export function execOutput(tc: ToolCall): string | undefined {
+  if (!SHELL_TOOLS.has(tc.name)) return undefined;
+  const parts = outputParts(tc.output);
+  if (!parts) return undefined;
+  const entries: Array<string | ExecChunk> = [];
+  let chunks = 0;
+  let textParts = 0;
+  for (const part of parts) {
+    if (!part || typeof part !== "object") continue;
+    const { type, text, image_url } = part as {
+      type?: unknown;
+      text?: unknown;
+      image_url?: unknown;
+    };
+    if (typeof text !== "string") {
+      // The data URI stays in the text: the Langfuse SDK finds it there, uploads
+      // the image and replaces it with a media tag (docs: PLAN_TRACING_NACHLAUF).
+      if (type === "input_image")
+        entries.push(typeof image_url === "string" ? image_url : "[image]");
+      continue;
+    }
+    textParts += 1;
+    for (const line of text.split("\n")) {
+      const chunk = execChunk(line);
+      if (chunk) {
+        entries.push(chunk);
+        chunks += 1;
+      } else if (line.trim() && !HEADER_LINE.test(line)) entries.push(line);
+    }
+  }
+  // A script that printed `r.output` itself has no chunk: its text is the output.
+  if (textParts === 0 && entries.length === 0) return undefined;
+  const commands = execCommands(tc);
+  const labelled = commands.length > 1 && commands.length === chunks;
+  let index = 0;
+  return entries
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      const command = labelled ? commands[index] : undefined;
+      index += 1;
+      const running =
+        entry.exit_code === undefined && entry.session_id !== undefined
+          ? `(session ${String(entry.session_id)} still running)`
+          : "";
+      return [command ? `$ ${command.cmd}` : "", entry.output.trimEnd(), running]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+}
+
 /** DEBUG for polling, WARNING for a shell command that exited non-zero. */
 export function toolLevel(tc: ToolCall): "DEBUG" | "WARNING" | undefined {
   if (POLLING_TOOLS.has(tc.name)) return "DEBUG";
