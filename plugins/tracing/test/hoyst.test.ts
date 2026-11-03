@@ -10,6 +10,7 @@ import {
   generationLevel,
   helperFromSessionMeta,
   helperFromSpawnArgs,
+  helperTurnInput,
   hoystCommands,
   phaseBoundary,
   phaseFor,
@@ -329,5 +330,53 @@ describe("exec scripts (Codex 0.162)", () => {
     expect(
       execOutput(tc("wait_agent", {}, [header, chunk({ exit_code: 0, output: "x" })])),
     ).toBeUndefined();
+  });
+});
+
+describe("helper turn input", () => {
+  it("describes a helper whose brief is missing from its rollout", () => {
+    const helper = helperFromSessionMeta({
+      sessionId: "t",
+      agentPath: "/root/strang_c",
+      agentRole: "zu-urteil",
+      agentNickname: "Dewey",
+    });
+    const phase = phaseFor("strang_c", "zu-urteil");
+    const steps = [
+      { startTime: 0, endTime: 1, toolCalls: [tc("wait_agent", { timeout_ms: 1 })] },
+      {
+        startTime: 1,
+        endTime: 2,
+        toolCalls: [
+          tc(
+            "exec",
+            'text(await tools.exec_command({cmd:"hoyst corpus hits --query SV",max_output_tokens:3500}));',
+          ),
+          tc("exec", 'text(await tools.exec_command({cmd:"ls"}));'),
+        ],
+      },
+    ];
+    expect(helperTurnInput(helper, phase, steps)).toEqual({
+      task_name: "strang_c",
+      agent_type: "zu-urteil",
+      phase: "2",
+      phase_label: "Prüfstränge A–E",
+      first_command: "hoyst corpus hits --query SV",
+    });
+    expect(helperTurnInput({ taskName: "provenienz_final" }, undefined, [])).toEqual({
+      task_name: "provenienz_final",
+    });
+    // A script that cannot be read as commands contributes its first line, cut short.
+    const script = [
+      {
+        startTime: 0,
+        endTime: 1,
+        toolCalls: [tc("exec", `const x = ${"y".repeat(300)};\ntext(x);`)],
+      },
+    ];
+    expect(helperTurnInput(helper, undefined, script)?.first_command).toBe(
+      `const x = ${"y".repeat(190)}…`,
+    );
+    expect(helperTurnInput({}, phase, steps)).toBeUndefined();
   });
 });

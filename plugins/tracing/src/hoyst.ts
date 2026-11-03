@@ -491,6 +491,36 @@ export function execOutput(tc: ToolCall): string | undefined {
     .join("\n");
 }
 
+/** The first line of a script that could not be read as commands, cut to a readable length. */
+function firstLine(text: string | undefined): string | undefined {
+  const line = text?.split("\n").find((candidate) => candidate.trim());
+  if (!line) return undefined;
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
+
+/**
+ * Input of a helper turn whose brief is not in its rollout (Codex encrypts it in
+ * the parent's spawn_agent call): what the helper is, its phase and the first
+ * command it ran.
+ */
+export function helperTurnInput(
+  helper: HelperInfo,
+  phase: Phase | undefined,
+  steps: readonly ModelStep[],
+): Record<string, unknown> | undefined {
+  if (!helper.taskName) return undefined;
+  const firstExec = steps.flatMap((step) => step.toolCalls).find((tc) => SHELL_TOOLS.has(tc.name));
+  const firstCommand = firstExec
+    ? (execCommands(firstExec)[0]?.cmd ?? firstLine(shellText(firstExec)))
+    : undefined;
+  return {
+    task_name: helper.taskName,
+    ...(helper.agentType ? { agent_type: helper.agentType } : {}),
+    ...(phase ? { phase: phase.phase, phase_label: phase.label } : {}),
+    ...(firstCommand ? { first_command: firstCommand } : {}),
+  };
+}
+
 /** DEBUG for polling, WARNING for a shell command that exited non-zero. */
 export function toolLevel(tc: ToolCall): "DEBUG" | "WARNING" | undefined {
   if (POLLING_TOOLS.has(tc.name)) return "DEBUG";

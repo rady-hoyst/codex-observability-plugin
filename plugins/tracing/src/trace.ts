@@ -24,6 +24,7 @@ import {
   helperFromSessionMeta,
   helperFromSpawnArgs,
   helperMetadata,
+  helperTurnInput,
   hoystCommands,
   phaseBoundary,
   phaseFor,
@@ -576,7 +577,11 @@ async function emitTurn(
       ? (subagentTurnName(helper!, ctx.turnNumber, ctx.turnCount) ?? "Codex Subagent Turn")
       : (ctx.config.trace_name ?? "Codex Turn"),
     {
-      input: toMultimodalContent(turn.userInput, turn.userImages),
+      // Hoyst fork: a helper's brief is encrypted in the parent's spawn_agent call
+      // and absent from its own rollout, so describe the helper instead of `null`.
+      input:
+        toMultimodalContent(turn.userInput, turn.userImages) ??
+        (helper ? helperTurnInput(helper, helperPhase, turn.steps) : undefined),
       output: turn.finalOutput,
       level: turn.aborted ? "WARNING" : undefined,
       statusMessage: turn.aborted ? "Turn interrupted by user" : undefined,

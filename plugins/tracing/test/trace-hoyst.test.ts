@@ -200,6 +200,24 @@ describe("Hoyst skill run", () => {
     );
   });
 
+  it("describes a helper turn whose brief is missing from its rollout", async () => {
+    const dir = stageFixtures();
+    await convertRollout(path.join(dir, "rollout-hoyst-main.jsonl"), { config: baseConfig });
+    const turns = exporter
+      .getFinishedSpans()
+      .filter((s) => s.name.startsWith("turn ") && obsType(s) === "agent")
+      .sort((a, b) => a.name.localeCompare(b.name));
+    // Turn 1 carries its brief; turn 2 has none (Codex encrypts it in spawn_agent).
+    expect(attr(turns[0], "langfuse.observation.input")).toBe("Auftrag 1 fuer strang_c");
+    expect(JSON.parse(attr(turns[1], "langfuse.observation.input")!)).toEqual({
+      task_name: "strang_c",
+      agent_type: "zu-urteil",
+      phase: "2",
+      phase_label: "Prüfstränge A–E",
+      first_command: "hoyst corpus hits --query SV",
+    });
+  });
+
   it("shows exec calls as their command and the plain output (Codex 0.162 shape)", async () => {
     const dir = stageFixtures();
     await convertRollout(path.join(dir, "rollout-hoyst-main.jsonl"), { config: baseConfig });
