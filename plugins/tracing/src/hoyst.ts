@@ -309,8 +309,13 @@ function readStringLiteral(
   return undefined;
 }
 
+const IDENTIFIER_NAME = /^[A-Za-z_$][\w$]*$/;
+
 /** The string a `const name = "…"` in the script binds (ES shorthand `{cmd}` properties). */
 function boundString(script: string, name: string): string | undefined {
+  // The name goes into a pattern; only an identifier can be bound, and only an
+  // identifier is safe there (`$` escaped below).
+  if (!IDENTIFIER_NAME.test(name)) return undefined;
   const pattern = new RegExp(
     `(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\s*=\\s*(?=["'\`])`,
   );
@@ -339,7 +344,8 @@ function readCallObject(script: string, start: number): ExecCommand | undefined 
     skip();
     if (script[i] === "}") break;
     let key: string | undefined;
-    if (script[i] === '"' || script[i] === "'") {
+    const quoted = script[i] === '"' || script[i] === "'";
+    if (quoted) {
       const literal = readStringLiteral(script, i);
       if (!literal) return undefined;
       key = literal.value;
@@ -352,6 +358,10 @@ function readCallObject(script: string, start: number): ExecCommand | undefined 
     skip();
     let value: string | number | boolean | undefined;
     if (script[i] !== ":") {
+      // Shorthand exists for identifiers only. A quoted key without a value means
+      // the script's quoting is broken and the "key" is a run of code up to the
+      // next quote, e.g. `max_output_tokens:12000}),  tools.exec_command({cmd:`.
+      if (quoted) return undefined;
       value = boundString(script, key);
     } else {
       i += 1;
@@ -383,27 +393,38 @@ function readCallObject(script: string, start: number): ExecCommand | undefined 
 const EXEC_CALL = /tools\.exec_command\s*\(\s*(?=\{)/g;
 const OTHER_TOOL_CALL = /tools\.(?!exec_command\b)[A-Za-z_$][\w$]*\s*\(/;
 
-/** The `tools.exec_command({…})` calls of an exec script, in order; none for other shapes. */
-export function execCommands(tc: ToolCall): ExecCommand[] {
+/** Every `tools.exec_command({…})` call of an exec script, in order; `undefined` where one cannot be read. */
+function scriptCalls(tc: ToolCall): Array<ExecCommand | undefined> {
   if (!SHELL_TOOLS.has(tc.name) || typeof tc.args !== "string") return [];
   const script = tc.args;
-  const calls: ExecCommand[] = [];
-  for (const match of script.matchAll(EXEC_CALL)) {
-    const call = readCallObject(script, match.index + match[0].length);
-    if (call) calls.push(call);
-  }
-  return calls;
+  return Array.from(script.matchAll(EXEC_CALL), (match) => {
+    // The script is the agent's own text and may be broken JS; a call the
+    // reader trips over is unreadable, never a failed turn.
+    try {
+      return readCallObject(script, match.index + match[0].length);
+    } catch {
+      return undefined;
+    }
+  });
+}
+
+/** The `tools.exec_command({…})` calls of an exec script that can be read, in order; none for other shapes. */
+export function execCommands(tc: ToolCall): ExecCommand[] {
+  return scriptCalls(tc).filter((call): call is ExecCommand => call !== undefined);
 }
 
 /**
  * The input of an exec observation: the command object of a Codex 0.162 script
  * (`{cmd, max_output_tokens}`; an array when the script ran several commands),
- * else the raw arguments (older shapes, scripts that also patch files or read images).
+ * else the raw arguments (older shapes, scripts that also patch files or read
+ * images, scripts with a call that cannot be read).
  */
 export function execInput(tc: ToolCall): unknown {
   if (typeof tc.args !== "string") return tc.args;
-  const calls = execCommands(tc);
-  if (calls.length === 0 || OTHER_TOOL_CALL.test(tc.args)) return tc.args;
+  const calls = scriptCalls(tc);
+  if (calls.length === 0 || calls.includes(undefined) || OTHER_TOOL_CALL.test(tc.args)) {
+    return tc.args;
+  }
   return calls.length === 1 ? calls[0] : calls;
 }
 
@@ -472,8 +493,9 @@ export function execOutput(tc: ToolCall): string | undefined {
   }
   // A script that printed `r.output` itself has no chunk: its text is the output.
   if (textParts === 0 && entries.length === 0) return undefined;
-  const commands = execCommands(tc);
-  const labelled = commands.length > 1 && commands.length === chunks;
+  const commands = scriptCalls(tc);
+  const labelled =
+    commands.length > 1 && commands.length === chunks && !commands.includes(undefined);
   let index = 0;
   return entries
     .map((entry) => {
@@ -511,7 +533,7 @@ export function helperTurnInput(
   if (!helper.taskName) return undefined;
   const firstExec = steps.flatMap((step) => step.toolCalls).find((tc) => SHELL_TOOLS.has(tc.name));
   const firstCommand = firstExec
-    ? (execCommands(firstExec)[0]?.cmd ?? firstLine(shellText(firstExec)))
+    ? (scriptCalls(firstExec)[0]?.cmd ?? firstLine(shellText(firstExec)))
     : undefined;
   return {
     task_name: helper.taskName,

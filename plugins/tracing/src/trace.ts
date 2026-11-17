@@ -784,29 +784,64 @@ function hoystToolMetadata(tc: ToolCall, phase: Phase | undefined): Record<strin
   };
 }
 
+type ToolView = {
+  input: unknown;
+  output: string | undefined;
+  level: "ERROR" | "WARNING" | "DEBUG" | undefined;
+  statusMessage: string | undefined;
+  metadata: Record<string, unknown>;
+};
+
+/**
+ * Hoyst fork: how a tool call is shown. The readers in hoyst.ts parse text the
+ * agent wrote; if one of them throws, the call is shown raw, as upstream does,
+ * instead of failing its turn and, with fail_on_error, the whole upload.
+ */
+function toolView(tc: ToolCall, phase: Phase | undefined): ToolView {
+  try {
+    // Polling tools drop to DEBUG, a shell command that exited non-zero is a
+    // WARNING (the agent usually recovers; ERROR stays for faults). Exec calls
+    // show their command object and the plain output of the Codex 0.162
+    // script wrapper; other tools stay as they are.
+    const failedExit = exitCodes(tc).filter((code) => code !== 0);
+    return {
+      input: execInput(tc),
+      output: tc.output != null ? (execOutput(tc) ?? toText(tc.output)) : undefined,
+      level: tc.error ? "ERROR" : toolLevel(tc),
+      statusMessage: tc.error ?? (failedExit.length ? `exit ${failedExit.join(",")}` : undefined),
+      metadata: hoystToolMetadata(tc, phase),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLog(`tool call ${tc.callId} shown raw, reading it failed:`, error);
+    return {
+      input: tc.args,
+      output: tc.output != null ? toText(tc.output) : undefined,
+      level: tc.error ? "ERROR" : undefined,
+      statusMessage: tc.error,
+      metadata: { ...phaseMetadata(phase), "hoyst.read_error": message },
+    };
+  }
+}
+
 function emitToolCall(
   tc: ToolCall,
   parent: LangfuseObservation,
   fallbackEnd: number,
   phase?: Phase,
 ): LangfuseObservation {
-  // Hoyst fork: polling tools drop to DEBUG, a shell command that exited
-  // non-zero is a WARNING (the agent usually recovers; ERROR stays for faults).
-  const level = tc.error ? "ERROR" : toolLevel(tc);
-  const failedExit = exitCodes(tc).filter((code) => code !== 0);
+  const view = toolView(tc, phase);
   const tool = startObservation(
     toolObservationName(tc),
     {
-      // Hoyst fork: exec calls show their command object and the plain output of
-      // the Codex 0.162 script wrapper (hoyst.ts); other tools stay as they are.
-      input: execInput(tc),
-      output: tc.output != null ? (execOutput(tc) ?? toText(tc.output)) : undefined,
-      level,
-      statusMessage: tc.error ?? (failedExit.length ? `exit ${failedExit.join(",")}` : undefined),
+      input: view.input,
+      output: view.output,
+      level: view.level,
+      statusMessage: view.statusMessage,
       metadata: {
         "codex.call_id": tc.callId,
         "codex.tool_name": tc.name || "tool",
-        ...hoystToolMetadata(tc, phase),
+        ...view.metadata,
       },
     },
     {

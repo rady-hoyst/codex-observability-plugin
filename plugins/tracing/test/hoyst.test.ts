@@ -255,6 +255,30 @@ describe("exec scripts (Codex 0.162)", () => {
     expect(execInput(exec({ cmd: "ls" }))).toEqual({ cmd: "ls" });
   });
 
+  it("treats a call with broken quoting as unreadable instead of throwing", () => {
+    // The quote after "max_output_tokens is missing, so the text up to the next
+    // quote reads as a key without a value. Taken for `{cmd}` shorthand it went
+    // into a RegExp and threw `Unmatched ')'`, which aborted a whole upload.
+    const broken =
+      "const [a, b] = await Promise.all([tools.exec_command({cmd:\"sed -n '1,80p' akte.md\", " +
+      '"max_output_tokens:12000}),  tools.exec_command({cmd:"rg -n Zahlung akte.md", max_output_tokens:12000})]);';
+    expect(execCommands(exec(broken))).toEqual([
+      { cmd: "rg -n Zahlung akte.md", max_output_tokens: 12000 },
+    ]);
+    // One call unreadable: the input is the raw script, the output carries no labels.
+    expect(execInput(exec(broken))).toBe(broken);
+    const outputs = [
+      chunk({ exit_code: 0, output: "a\n" }),
+      chunk({ exit_code: 0, output: "b\n" }),
+    ];
+    expect(execOutput(exec(broken, outputs))).toBe("a\nb");
+    // A quoted key is never shorthand; a `$` identifier still is.
+    expect(execCommands(exec('const cmd = "ls"; tools.exec_command({"cmd"});'))).toEqual([]);
+    expect(
+      execCommands(exec('const $c = "hoyst case list"; tools.exec_command({cmd:$c});')),
+    ).toEqual([{ cmd: "hoyst case list" }]);
+  });
+
   it("unwraps the Codex 0.162 output into the commands' plain text", () => {
     const one = exec('text(await tools.exec_command({cmd:"hoyst case list"}));', [
       header,
@@ -376,6 +400,22 @@ describe("helper turn input", () => {
     ];
     expect(helperTurnInput(helper, undefined, script)?.first_command).toBe(
       `const x = ${"y".repeat(190)}…`,
+    );
+    // A first call that cannot be read is not replaced by a later one.
+    const brokenFirst = [
+      {
+        startTime: 0,
+        endTime: 1,
+        toolCalls: [
+          tc(
+            "exec",
+            'tools.exec_command({cmd:"ls", "max_output_tokens:1}); tools.exec_command({cmd:"pwd"});',
+          ),
+        ],
+      },
+    ];
+    expect(helperTurnInput(helper, undefined, brokenFirst)?.first_command).toBe(
+      'tools.exec_command({cmd:"ls", "max_output_tokens:1}); tools.exec_command({cmd:"pwd"});',
     );
     expect(helperTurnInput({}, phase, steps)).toBeUndefined();
   });
